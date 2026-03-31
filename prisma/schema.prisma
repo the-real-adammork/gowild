@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model SearchConfig {
+  id                 Int     @id @default(1)
+  searchDaysOut      Int     @default(7)
+  searchIncludeToday Boolean @default(true)
+  fareTabs           String  @default("[\"GoWild\"]")
+  emailTo            String  @default("")
+  emailEnabled       Boolean @default(true)
+  cronBaseHours      String  @default("[7,11,15,21]")
+  cronJitterMinutes  Int     @default(30)
+}
+
+model Route {
+  id                      Int      @id @default(autoincrement())
+  origin                  String
+  destination             String
+  enabled                 Boolean  @default(true)
+  nonStopOnly             Boolean  @default(false)
+  maxLayoverMinutes       Int?
+  allowedLayoverAirports  String   @default("[]")
+  maxPrice                Float?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  flights                 Flight[]
+}
+
+model Flight {
+  id                   Int      @id @default(autoincrement())
+  routeId              Int
+  route                Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  departureDate        String
+  departureTime        String
+  arrivalTime          String
+  totalDuration        String
+  stops                Int
+  stopsText            String
+  segments             String   @default("[]")
+  layoverAirports      String   @default("[]")
+  layoverDurations     String   @default("[]")
+  fareTab              String
+  price                Float
+  priceUnit            String   @default("USD")
+  matchesFilters       Boolean  @default(false)
+  scrapeRunId          Int
+  scrapeRun            ScrapeRun @relation(fields: [scrapeRunId], references: [id], onDelete: Cascade)
+  scrapedAt            DateTime @default(now())
+
+  @@index([routeId, departureDate])
+  @@index([scrapeRunId])
+  @@index([matchesFilters, scrapedAt])
+  @@index([departureDate, price])
+}
+
+model ScrapeRun {
+  id             Int       @id @default(autoincrement())
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
+  status         String    @default("running")
+  routesSearched Int       @default(0)
+  datesSearched  Int       @default(0)
+  flightsFound   Int       @default(0)
+  matchesFound   Int       @default(0)
+  error          String?
+  flights        Flight[]
+}
