@@ -1,0 +1,3 @@
+[submodule "wg-on-demand"]
+	path = wg-on-demand
+	url = https://github.com/Stacks-du-Beurre/wg-on-demand.git
