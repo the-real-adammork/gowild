@@ -2,6 +2,10 @@
 
 Self-hosted flight tracker that monitors Frontier Airlines GoWild and Discount Den availability, filters by your criteria, and sends email alerts.
 
+![Dashboard — live flight results with pricing and match status](docs/images/dashboard.png)
+
+![Routes — configure origin/destination pairs with layover and price filters](docs/images/routes.png)
+
 ## Prerequisites
 
 - **macOS** (tested on Mac Mini M1)
