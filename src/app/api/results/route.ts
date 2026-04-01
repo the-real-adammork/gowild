@@ -12,7 +12,18 @@ export async function GET(request: NextRequest) {
   const sortBy = searchParams.get('sortBy') || 'price'
   const sortOrder = (searchParams.get('sortOrder') || 'asc') as 'asc' | 'desc'
 
-  const where: Record<string, unknown> = {}
+  // Only show flights from the latest successful/partial run
+  const latestRun = await prisma.scrapeRun.findFirst({
+    where: { status: { in: ['success', 'partial'] } },
+    orderBy: { startedAt: 'desc' },
+    select: { id: true },
+  })
+
+  if (!latestRun) {
+    return NextResponse.json({ flights: [], total: 0, page, pageSize, totalPages: 0 })
+  }
+
+  const where: Record<string, unknown> = { scrapeRunId: latestRun.id }
   if (matchesOnly) where.matchesFilters = true
   if (routeId) where.routeId = parseInt(routeId)
   if (fareTab) where.fareTab = fareTab

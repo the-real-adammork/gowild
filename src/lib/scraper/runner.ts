@@ -120,10 +120,11 @@ export async function runScraper(): Promise<void> {
         }
 
         for (const flight of parsedFlights) {
-          const matchesFilters = applyFilters(flight, filters)
           const dedupKey = `${route.origin}|${route.destination}|${flightDedupKey(flight)}`
-          const isNew = !seenKeys.has(dedupKey)
-          if (isNew) seenKeys.add(dedupKey)
+          if (seenKeys.has(dedupKey)) continue
+          seenKeys.add(dedupKey)
+
+          const matchesFilters = applyFilters(flight, filters)
 
           await prisma.flight.create({
             data: {
@@ -145,7 +146,7 @@ export async function runScraper(): Promise<void> {
             },
           })
 
-          if (matchesFilters && isNew) {
+          if (matchesFilters) {
             allMatchingFlights.push({ ...flight, origin: route.origin, destination: route.destination })
           }
         }
