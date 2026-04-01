@@ -1,4 +1,8 @@
-import { chromium, type Browser, type BrowserContext } from 'rebrowser-playwright'
+const USER_AGENTS = [
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0',
+]
 
 function formatDateParam(date: Date): string {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
@@ -18,175 +22,129 @@ export interface FetchResult {
   html?: string
   error?: string
   statusCode?: number
-  blocked?: boolean
-  sessionCookie?: string
+  blocked?: boolean // true = 403, caller should abort the entire run
+  sessionCookie?: string // reuse across requests
 }
-
-let browser: Browser | null = null
-let browserContext: BrowserContext | null = null
-
-const STEALTH_SCRIPTS = `
-  Object.defineProperty(navigator, 'webdriver', { get: () => false });
-  Object.defineProperty(navigator, 'plugins', {
-    get: () => [1, 2, 3, 4, 5].map(() => ({
-      name: 'Chrome PDF Plugin',
-      description: 'Portable Document Format',
-      filename: 'internal-pdf-viewer',
-      length: 1,
-    })),
-  });
-  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-  window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: { isInstalled: false } };
-  const originalQuery = window.navigator.permissions.query;
-  window.navigator.permissions.query = (parameters) =>
-    parameters.name === 'notifications'
-      ? Promise.resolve({ state: Notification.permission })
-      : originalQuery(parameters);
-`
 
 /**
- * Check if the page is showing a PerimeterX or Cloudflare challenge.
- * If so, wait for it to auto-resolve (up to ~15s).
- * Returns the final HTML if resolved, or null if still blocked.
+ * Creates a session by making an initial request and capturing the ASP.NET_SessionId cookie.
+ * Call once at the start of a scrape run, then pass the cookie to all subsequent fetches.
  */
-async function waitForChallenge(page: { content: () => Promise<string>; waitForTimeout: (ms: number) => Promise<void> }): Promise<string | null> {
-  let html = await page.content()
-
-  const isChallenge = (h: string) =>
-    h.includes('px-captcha') ||
-    h.includes('perimeterx') ||
-    h.includes('cf-challenge') ||
-    h.includes('Just a moment')
-
-  if (!isChallenge(html)) return html
-
-  console.log('[fetcher] Challenge page detected, waiting for auto-resolve...')
-
-  // PerimeterX sometimes auto-resolves after running its JS
-  for (let i = 0; i < 3; i++) {
-    await page.waitForTimeout(5000)
-    html = await page.content()
-    if (!isChallenge(html)) {
-      console.log('[fetcher] Challenge resolved!')
-      return html
-    }
-  }
-
-  return null // Still blocked after waiting
-}
-
-export async function initSession(_userAgent?: string): Promise<{ cookie: string } | null> {
+export async function initSession(userAgent: string): Promise<{ cookie: string } | null> {
   try {
-    if (browser) {
-      await browser.close().catch(() => {})
-      browser = null
-      browserContext = null
-    }
-
-    // Use system Chrome for authentic TLS fingerprint
-    browser = await chromium.launch({
-      channel: 'chrome',
-      headless: false, // non-headless to avoid headless detection
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-        '--window-position=-9999,-9999', // offscreen so it doesn't interfere
-      ],
-    })
-
-    browserContext = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1440, height: 900 },
-      locale: 'en-US',
-      timezoneId: 'America/Los_Angeles',
-      extraHTTPHeaders: {
-        'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"',
+    const res = await fetch('https://booking.flyfrontier.com/', {
+      headers: {
+        'User-Agent': userAgent,
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9',
       },
+      redirect: 'follow',
     })
-
-    await browserContext.addInitScript(STEALTH_SCRIPTS)
-
-    // Visit homepage — may hit PerimeterX, wait for it
-    const page = await browserContext.newPage()
-    await page.goto('https://booking.flyfrontier.com/', { waitUntil: 'domcontentloaded', timeout: 45000 })
-
-    const resolved = await waitForChallenge(page)
-    if (!resolved) {
-      console.error('[fetcher] Could not pass PerimeterX challenge on init')
+    const setCookie = res.headers.get('set-cookie')
+    if (setCookie) {
+      const sessionCookie = setCookie.split(',')
+        .map((c) => c.split(';')[0].trim())
+        .filter((c) => c.includes('='))
+        .join('; ')
+      return { cookie: sessionCookie }
     }
-
-    await page.waitForTimeout(1000 + Math.random() * 2000)
-    await page.close()
-
-    return { cookie: 'playwright-session' }
-  } catch (err) {
-    console.error('[fetcher] Browser init failed:', err)
-    return null
+  } catch {
+    // Fall through
   }
+  return null
 }
 
 export function pickUserAgent(): string {
-  return 'playwright'
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]
 }
 
 export async function fetchFlightPage(
   origin: string,
   destination: string,
   date: Date,
-  _sessionCookie: string,
-  _userAgent: string,
+  sessionCookie: string,
+  userAgent: string,
 ): Promise<FetchResult> {
-  if (!browserContext) {
-    return { ok: false, error: 'Browser not initialized — call initSession first', blocked: false }
+  const url = buildSearchUrl(origin, destination, date)
+
+  const headers: Record<string, string> = {
+    'User-Agent': userAgent,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cookie': sessionCookie,
   }
 
-  const url = buildSearchUrl(origin, destination, date)
-  const page = await browserContext.newPage()
-
   try {
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
+    const response = await fetch(url, {
+      headers,
+      redirect: 'manual',
+    })
 
-    if (!response) {
-      return { ok: false, error: 'No response from page', blocked: false }
+    // 403 = blocked by bot detection. Abort immediately.
+    if (response.status === 403) {
+      return { ok: false, error: 'Blocked (403) — aborting to protect IP', statusCode: 403, blocked: true }
     }
 
-    if (response.status() === 429) {
+    // 302 redirect: follow it to /Flight/Select to get the actual data
+    if (response.status === 302 || response.status === 301) {
+      const setCookie = response.headers.get('set-cookie')
+      let cookies = sessionCookie
+      if (setCookie) {
+        const newCookies = setCookie.split(',')
+          .map((c) => c.split(';')[0].trim())
+          .filter((c) => c.includes('='))
+        cookies = [sessionCookie, ...newCookies].filter(Boolean).join('; ')
+      }
+
+      const location = response.headers.get('location')
+      if (location) {
+        const redirectUrl = location.startsWith('http') ? location : `https://booking.flyfrontier.com${location}`
+        const redirectRes = await fetch(redirectUrl, {
+          headers: { ...headers, Cookie: cookies },
+          redirect: 'follow',
+        })
+
+        if (redirectRes.status === 403) {
+          return { ok: false, error: 'Blocked (403) on redirect — aborting', statusCode: 403, blocked: true }
+        }
+
+        if (redirectRes.status === 200) {
+          const html = await redirectRes.text()
+          if (html.includes('cf-challenge') || html.includes('Just a moment')) {
+            return { ok: false, error: 'Cloudflare challenge detected', statusCode: 200, blocked: true }
+          }
+          return { ok: true, html, sessionCookie: cookies }
+        }
+      }
+      return { ok: false, error: `Redirect failed`, statusCode: response.status }
+    }
+
+    if (response.status === 200) {
+      const html = await response.text()
+      if (html.includes('cf-challenge') || html.includes('Just a moment')) {
+        return { ok: false, error: 'Cloudflare challenge detected', statusCode: 200, blocked: true }
+      }
+      return { ok: true, html, sessionCookie }
+    }
+
+    if (response.status === 429) {
       return { ok: false, error: 'Rate limited (429) — aborting', statusCode: 429, blocked: true }
     }
 
-    // Wait for JS to execute
-    await page.waitForTimeout(3000 + Math.random() * 2000)
-
-    // Try to resolve any challenge page (403 or otherwise)
-    const html = await waitForChallenge(page)
-
-    if (!html) {
-      return { ok: false, error: 'Blocked by bot detection (PerimeterX) — could not auto-resolve', statusCode: 403, blocked: true }
-    }
-
-    return { ok: true, html }
+    return { ok: false, error: `HTTP ${response.status}`, statusCode: response.status }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
-  } finally {
-    await page.close()
   }
 }
 
-export async function closeBrowser(): Promise<void> {
-  if (browser) {
-    await browser.close().catch(() => {})
-    browser = null
-    browserContext = null
-  }
-}
+// No-op — kept for runner.ts compatibility (was used by Playwright)
+export async function closeBrowser(): Promise<void> {}
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export function randomDelay(): Promise<void> {
-  const ms = 5000 + Math.random() * 5000
+  const ms = 5000 + Math.random() * 5000 // 5-10 seconds
   return sleep(ms)
 }
