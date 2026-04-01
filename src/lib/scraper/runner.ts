@@ -1,8 +1,8 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { prisma } from '../db'
-import { fetchFlightPage, initSession, pickUserAgent, randomDelay, closeBrowser } from './fetcher'
-import { parseFlightHtml, flightDedupKey } from './parser'
+import { fetchFlightPage, randomDelay } from './fetcher'
+import { parseFlightData, flightDedupKey } from './parser'
 import { applyFilters } from './filters'
 import type { RouteFilters } from './filters'
 import type { ParsedFlight } from './types'
@@ -40,7 +40,7 @@ export async function runScraper(): Promise<void> {
 
   let totalFetches = 0
   let failedFetches = 0
-  let sampleHtml: string | null = null
+  let sampleData: string | null = null
   const allMatchingFlights: FlightWithRoute[] = []
 
   try {
@@ -77,18 +77,9 @@ export async function runScraper(): Promise<void> {
     }
     console.log(`[runner] Searching ${searchDates.length} date(s), fareTabs: ${fareTabs.join(', ')}`)
 
-    // Use consistent UA and session cookie for the entire run
-    const userAgent = pickUserAgent()
-    const session = await initSession(userAgent)
-    let sessionCookie = session?.cookie || ''
-    console.log(`[runner] Session initialized: ${sessionCookie ? 'got cookie' : 'no cookie (proceeding anyway)'}`)
-
     const seenKeys = new Set<string>()
-    let blocked = false
 
     for (const route of routes) {
-      if (blocked) break
-
       const filters: RouteFilters = {
         nonStopOnly: route.nonStopOnly,
         maxLayoverMinutes: route.maxLayoverMinutes ?? null,
@@ -104,39 +95,23 @@ export async function runScraper(): Promise<void> {
       }
 
       for (const date of searchDates) {
-        if (blocked) break
-
         const departureDateStr = date.toISOString().slice(0, 10)
         totalFetches++
 
-        const result = await fetchFlightPage(route.origin, route.destination, date, sessionCookie, userAgent)
+        const result = await fetchFlightPage(route.origin, route.destination, date)
 
-        // Abort entire run on block
-        if (result.blocked) {
-          console.error(`[runner] BLOCKED: ${result.error} — aborting run to protect IP`)
-          blocked = true
-          failedFetches++
-          break
-        }
-
-        if (!result.ok || !result.html) {
-          console.warn(`[runner] Fetch failed for ${route.origin}->${route.destination} on ${departureDateStr}: ${result.error ?? 'no HTML'}`)
+        if (!result.ok || !result.data) {
+          console.warn(`[runner] Fetch failed for ${route.origin}->${route.destination} on ${departureDateStr}: ${result.error ?? 'no data'}`)
           failedFetches++
           await randomDelay()
           continue
         }
 
-        // Update session cookie if a new one was returned
-        if (result.sessionCookie) {
-          sessionCookie = result.sessionCookie
-        }
-
-        const html = result.html
-        if (sampleHtml === null) sampleHtml = html
+        if (sampleData === null) sampleData = result.data
 
         let parsedFlights: ParsedFlight[]
         try {
-          parsedFlights = parseFlightHtml(html, departureDateStr, fareTabs)
+          parsedFlights = parseFlightData(result.data, departureDateStr, fareTabs)
         } catch (err) {
           console.warn(`[runner] Parse failed for ${route.origin}->${route.destination} on ${departureDateStr}:`, err)
           failedFetches++
@@ -180,12 +155,12 @@ export async function runScraper(): Promise<void> {
       }
     }
 
-    // Save sample HTML
-    if (sampleHtml !== null) {
+    // Save sample response
+    if (sampleData !== null) {
       const rawResponsesDir = path.join(process.cwd(), 'data', 'raw-responses')
       await fs.mkdir(rawResponsesDir, { recursive: true })
-      await fs.writeFile(path.join(rawResponsesDir, `run-${runId}.html`), sampleHtml, 'utf-8')
-      console.log(`[runner] Saved sample HTML to data/raw-responses/run-${runId}.html`)
+      await fs.writeFile(path.join(rawResponsesDir, `run-${runId}.json`), sampleData, 'utf-8')
+      console.log(`[runner] Saved sample response to data/raw-responses/run-${runId}.json`)
     }
 
     // Send email
@@ -210,9 +185,7 @@ export async function runScraper(): Promise<void> {
     const matchesFound = allMatchingFlights.length
 
     let status: string
-    if (blocked) {
-      status = 'failed'
-    } else if (failedFetches === totalFetches && totalFetches > 0) {
+    if (failedFetches === totalFetches && totalFetches > 0) {
       status = 'failed'
     } else if (failedFetches > 0) {
       status = 'partial'
@@ -231,7 +204,6 @@ export async function runScraper(): Promise<void> {
         datesSearched: totalFetches,
         flightsFound: flightsFoundTotal,
         matchesFound,
-        error: blocked ? 'Blocked by bot detection (403) — run aborted' : null,
       },
     })
 
@@ -243,9 +215,6 @@ export async function runScraper(): Promise<void> {
       data: { status: 'failed', completedAt: new Date(), error: err instanceof Error ? err.message : String(err) },
     })
   } finally {
-    // Clean up resources
-    await closeBrowser()
-
     isRunning = false
 
     // Cleanup old data (90 days)

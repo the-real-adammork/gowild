@@ -1,5 +1,3 @@
-import * as cheerio from 'cheerio'
-import { decode } from 'html-entities'
 import type {
   FrontierFlightResponse,
   FrontierFlight,
@@ -8,89 +6,45 @@ import type {
 } from './types'
 
 /**
- * Extracts flight data from either:
- * - CrawlByte JSON response (has "results" with "journeys")
- * - Frontier HTML response (FlightData embedded in script tag)
+ * Extracts the Frontier flight data from CrawlByte's JSON response.
  */
 function extractFlightData(data: string): FrontierFlightResponse {
-  // Try parsing as JSON first (CrawlByte response)
-  try {
-    const parsed = JSON.parse(data)
-    // CrawlByte wraps the data in a "results" key with "journeys" inside
-    if (parsed.results?.journeys) {
-      return { journeys: parsed.results.journeys }
-    }
-    // Direct format
-    if (parsed.journeys && Array.isArray(parsed.journeys)) {
-      return parsed as FrontierFlightResponse
-    }
-  } catch {
-    // Not JSON — fall through to HTML parsing
+  const parsed = JSON.parse(data)
+
+  if (parsed.results?.journeys) {
+    return { journeys: parsed.results.journeys }
   }
 
-  // HTML parsing (legacy)
-  const $ = cheerio.load(data)
-  const scriptTags = $('script[type="text/javascript"]')
-
-  // Strategy 1: Look for FlightData = '...' pattern
-  for (let i = 0; i < scriptTags.length; i++) {
-    const raw = $(scriptTags[i]).html() ?? ''
-    const match = raw.match(/FlightData\s*=\s*'([^']+)'/)
-    if (match) {
-      const decoded = decode(match[1])
-      const parsed = JSON.parse(decoded)
-      if (parsed.journeys && Array.isArray(parsed.journeys)) {
-        return parsed as FrontierFlightResponse
-      }
-    }
+  if (parsed.journeys && Array.isArray(parsed.journeys)) {
+    return parsed as FrontierFlightResponse
   }
 
-  // Strategy 2: Fallback — try first { to last } in each script tag
-  for (let i = 0; i < scriptTags.length; i++) {
-    const raw = $(scriptTags[i]).html() ?? ''
-    const decoded = decode(raw)
-    const startIdx = decoded.indexOf('{')
-    const endIdx = decoded.lastIndexOf('}')
-    if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) continue
-    try {
-      const parsed = JSON.parse(decoded.substring(startIdx, endIdx + 1))
-      if (parsed.journeys && Array.isArray(parsed.journeys)) {
-        return parsed as FrontierFlightResponse
-      }
-    } catch {
-      continue
-    }
-  }
-
-  throw new Error('No flight data found')
+  throw new Error('No flight data found in response')
 }
 
 /**
- * Parses Frontier Airlines flight HTML and returns ParsedFlight objects.
+ * Parses Frontier Airlines flight data and returns ParsedFlight objects.
  */
-export function parseFlightHtml(
-  html: string,
+export function parseFlightData(
+  data: string,
   departureDate: string,
   fareTabs: string[] = ['GoWild'],
 ): ParsedFlight[] {
-  const data = extractFlightData(html)
+  const flightData = extractFlightData(data)
   const results: ParsedFlight[] = []
 
-  for (const journey of data.journeys) {
+  for (const journey of flightData.journeys) {
     if (!journey.flights) continue
 
     for (const flight of journey.flights) {
-      // GoWild fares
       if (fareTabs.includes('GoWild') && flight.isGoWildFareEnabled && flight.goWildFare > 0) {
         results.push(mapFlight(flight, departureDate, 'GoWild', flight.goWildFare, 'USD'))
       }
 
-      // Discount Den fares
       if (fareTabs.includes('Dollars') && flight.discountDenFare > 0) {
         results.push(mapFlight(flight, departureDate, 'Dollars', flight.discountDenFare, 'USD'))
       }
 
-      // Miles fares
       if (fareTabs.includes('Miles') && flight.milesFare > 0) {
         results.push(mapFlight(flight, departureDate, 'Miles', flight.milesFare, 'miles'))
       }
@@ -110,7 +64,6 @@ function mapFlight(
   const legs = flight.legs
   const firstLeg = legs[0]
   const lastLeg = legs[legs.length - 1]
-
   const stops = Math.max(0, legs.length - 1)
 
   const segments: ParsedSegment[] = legs.map((leg) => ({
@@ -147,9 +100,6 @@ function mapFlight(
   }
 }
 
-/**
- * Dedup key for within-run deduplication.
- */
 export function flightDedupKey(flight: ParsedFlight): string {
   const flightNos = flight.segments.map((s) => s.flightNo).sort().join('|')
   return `${flight.departureDate}:${flight.fareTab}:${flightNos}`

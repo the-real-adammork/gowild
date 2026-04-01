@@ -15,32 +15,18 @@ export function buildSearchUrl(origin: string, destination: string, date: Date):
 
 export interface FetchResult {
   ok: boolean
-  html?: string
+  data?: string
   error?: string
-  statusCode?: number
-  blocked?: boolean
-  sessionCookie?: string
-}
-
-export async function initSession(_userAgent?: string): Promise<{ cookie: string } | null> {
-  // No session needed — CrawlByte handles everything
-  return { cookie: 'crawlbyte' }
-}
-
-export function pickUserAgent(): string {
-  return 'crawlbyte'
 }
 
 /**
  * Fetch flight data via CrawlByte API.
- * Returns the raw Frontier JSON as the `html` field for parser compatibility.
+ * Returns the raw Frontier JSON string on success.
  */
 export async function fetchFlightPage(
   origin: string,
   destination: string,
   date: Date,
-  _sessionCookie: string,
-  _userAgent: string,
 ): Promise<FetchResult> {
   const apiKey = process.env.CRAWLBYTE_API_KEY
   if (!apiKey) {
@@ -50,7 +36,6 @@ export async function fetchFlightPage(
   const url = buildSearchUrl(origin, destination, date)
 
   try {
-    // Create task
     const createRes = await fetch(`${CRAWLBYTE_API}/tasks`, {
       method: 'POST',
       headers: {
@@ -65,18 +50,17 @@ export async function fetchFlightPage(
     })
 
     if (!createRes.ok) {
-      return { ok: false, error: `CrawlByte API error: HTTP ${createRes.status}`, statusCode: createRes.status }
+      return { ok: false, error: `CrawlByte API error: HTTP ${createRes.status}` }
     }
 
     const task = await createRes.json() as { id: string; status: string; result?: string[] }
 
-    // If already completed (fast response)
     if (task.status === 'completed' && task.result?.[0]) {
-      return { ok: true, html: task.result[0] }
+      return { ok: true, data: task.result[0] }
     }
 
     if (task.status === 'failed') {
-      return { ok: false, error: 'CrawlByte task failed immediately' }
+      return { ok: false, error: 'CrawlByte task failed' }
     }
 
     // Poll for result
@@ -92,7 +76,7 @@ export async function fetchFlightPage(
       const result = await pollRes.json() as { status: string; result?: string[] }
 
       if (result.status === 'completed' && result.result?.[0]) {
-        return { ok: true, html: result.result[0] }
+        return { ok: true, data: result.result[0] }
       }
 
       if (result.status === 'failed') {
@@ -106,14 +90,11 @@ export async function fetchFlightPage(
   }
 }
 
-export async function closeBrowser(): Promise<void> {}
-
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export function randomDelay(): Promise<void> {
-  // CrawlByte handles rate limiting, but add a small delay between requests
   const ms = 1000 + Math.random() * 2000
   return sleep(ms)
 }
