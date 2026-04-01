@@ -1,8 +1,4 @@
-const USER_AGENTS = [
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0',
-]
+const CRAWLBYTE_API = 'https://api.crawlbyte.ai/api'
 
 function formatDateParam(date: Date): string {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
@@ -22,122 +18,94 @@ export interface FetchResult {
   html?: string
   error?: string
   statusCode?: number
-  blocked?: boolean // true = 403, caller should abort the entire run
-  sessionCookie?: string // reuse across requests
+  blocked?: boolean
+  sessionCookie?: string
 }
 
-/**
- * Creates a session by making an initial request and capturing the ASP.NET_SessionId cookie.
- * Call once at the start of a scrape run, then pass the cookie to all subsequent fetches.
- */
-export async function initSession(userAgent: string): Promise<{ cookie: string } | null> {
-  try {
-    const res = await fetch('https://booking.flyfrontier.com/', {
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      redirect: 'follow',
-    })
-    const setCookie = res.headers.get('set-cookie')
-    if (setCookie) {
-      const sessionCookie = setCookie.split(',')
-        .map((c) => c.split(';')[0].trim())
-        .filter((c) => c.includes('='))
-        .join('; ')
-      return { cookie: sessionCookie }
-    }
-  } catch {
-    // Fall through
-  }
-  return null
+export async function initSession(_userAgent?: string): Promise<{ cookie: string } | null> {
+  // No session needed — CrawlByte handles everything
+  return { cookie: 'crawlbyte' }
 }
 
 export function pickUserAgent(): string {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]
+  return 'crawlbyte'
 }
 
+/**
+ * Fetch flight data via CrawlByte API.
+ * Returns the raw Frontier JSON as the `html` field for parser compatibility.
+ */
 export async function fetchFlightPage(
   origin: string,
   destination: string,
   date: Date,
-  sessionCookie: string,
-  userAgent: string,
+  _sessionCookie: string,
+  _userAgent: string,
 ): Promise<FetchResult> {
-  const url = buildSearchUrl(origin, destination, date)
-
-  const headers: Record<string, string> = {
-    'User-Agent': userAgent,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Cookie': sessionCookie,
+  const apiKey = process.env.CRAWLBYTE_API_KEY
+  if (!apiKey) {
+    return { ok: false, error: 'CRAWLBYTE_API_KEY not set' }
   }
 
+  const url = buildSearchUrl(origin, destination, date)
+
   try {
-    const response = await fetch(url, {
-      headers,
-      redirect: 'manual',
+    // Create task
+    const createRes = await fetch(`${CRAWLBYTE_API}/tasks`, {
+      method: 'POST',
+      headers: {
+        'Authorization': apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'flyfrontier',
+        input: [url],
+        multithread: false,
+      }),
     })
 
-    // 403 = blocked by bot detection. Abort immediately.
-    if (response.status === 403) {
-      return { ok: false, error: 'Blocked (403) — aborting to protect IP', statusCode: 403, blocked: true }
+    if (!createRes.ok) {
+      return { ok: false, error: `CrawlByte API error: HTTP ${createRes.status}`, statusCode: createRes.status }
     }
 
-    // 302 redirect: follow it to /Flight/Select to get the actual data
-    if (response.status === 302 || response.status === 301) {
-      const setCookie = response.headers.get('set-cookie')
-      let cookies = sessionCookie
-      if (setCookie) {
-        const newCookies = setCookie.split(',')
-          .map((c) => c.split(';')[0].trim())
-          .filter((c) => c.includes('='))
-        cookies = [sessionCookie, ...newCookies].filter(Boolean).join('; ')
+    const task = await createRes.json() as { id: string; status: string; result?: string[] }
+
+    // If already completed (fast response)
+    if (task.status === 'completed' && task.result?.[0]) {
+      return { ok: true, html: task.result[0] }
+    }
+
+    if (task.status === 'failed') {
+      return { ok: false, error: 'CrawlByte task failed immediately' }
+    }
+
+    // Poll for result
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 3000))
+
+      const pollRes = await fetch(`${CRAWLBYTE_API}/tasks/${task.id}`, {
+        headers: { 'Authorization': apiKey },
+      })
+
+      if (!pollRes.ok) continue
+
+      const result = await pollRes.json() as { status: string; result?: string[] }
+
+      if (result.status === 'completed' && result.result?.[0]) {
+        return { ok: true, html: result.result[0] }
       }
 
-      const location = response.headers.get('location')
-      if (location) {
-        const redirectUrl = location.startsWith('http') ? location : `https://booking.flyfrontier.com${location}`
-        const redirectRes = await fetch(redirectUrl, {
-          headers: { ...headers, Cookie: cookies },
-          redirect: 'follow',
-        })
-
-        if (redirectRes.status === 403) {
-          return { ok: false, error: 'Blocked (403) on redirect — aborting', statusCode: 403, blocked: true }
-        }
-
-        if (redirectRes.status === 200) {
-          const html = await redirectRes.text()
-          if (html.includes('cf-challenge') || html.includes('Just a moment')) {
-            return { ok: false, error: 'Cloudflare challenge detected', statusCode: 200, blocked: true }
-          }
-          return { ok: true, html, sessionCookie: cookies }
-        }
+      if (result.status === 'failed') {
+        return { ok: false, error: 'CrawlByte task failed' }
       }
-      return { ok: false, error: `Redirect failed`, statusCode: response.status }
     }
 
-    if (response.status === 200) {
-      const html = await response.text()
-      if (html.includes('cf-challenge') || html.includes('Just a moment')) {
-        return { ok: false, error: 'Cloudflare challenge detected', statusCode: 200, blocked: true }
-      }
-      return { ok: true, html, sessionCookie }
-    }
-
-    if (response.status === 429) {
-      return { ok: false, error: 'Rate limited (429) — aborting', statusCode: 429, blocked: true }
-    }
-
-    return { ok: false, error: `HTTP ${response.status}`, statusCode: response.status }
+    return { ok: false, error: 'CrawlByte task timed out' }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
 
-// No-op — kept for runner.ts compatibility (was used by Playwright)
 export async function closeBrowser(): Promise<void> {}
 
 export function sleep(ms: number): Promise<void> {
@@ -145,6 +113,7 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export function randomDelay(): Promise<void> {
-  const ms = 5000 + Math.random() * 5000 // 5-10 seconds
+  // CrawlByte handles rate limiting, but add a small delay between requests
+  const ms = 1000 + Math.random() * 2000
   return sleep(ms)
 }

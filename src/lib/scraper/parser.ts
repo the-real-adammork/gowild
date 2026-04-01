@@ -8,11 +8,28 @@ import type {
 } from './types'
 
 /**
- * Extracts the FlightData JSON from Frontier's HTML response.
- * The data is embedded as: FlightData = '{...HTML-encoded JSON...}';
+ * Extracts flight data from either:
+ * - CrawlByte JSON response (has "results" with "journeys")
+ * - Frontier HTML response (FlightData embedded in script tag)
  */
-function extractFlightData(html: string): FrontierFlightResponse {
-  const $ = cheerio.load(html)
+function extractFlightData(data: string): FrontierFlightResponse {
+  // Try parsing as JSON first (CrawlByte response)
+  try {
+    const parsed = JSON.parse(data)
+    // CrawlByte wraps the data in a "results" key with "journeys" inside
+    if (parsed.results?.journeys) {
+      return { journeys: parsed.results.journeys }
+    }
+    // Direct format
+    if (parsed.journeys && Array.isArray(parsed.journeys)) {
+      return parsed as FrontierFlightResponse
+    }
+  } catch {
+    // Not JSON — fall through to HTML parsing
+  }
+
+  // HTML parsing (legacy)
+  const $ = cheerio.load(data)
   const scriptTags = $('script[type="text/javascript"]')
 
   // Strategy 1: Look for FlightData = '...' pattern
@@ -45,7 +62,7 @@ function extractFlightData(html: string): FrontierFlightResponse {
     }
   }
 
-  throw new Error('No flight data found in HTML')
+  throw new Error('No flight data found')
 }
 
 /**
@@ -94,6 +111,8 @@ function mapFlight(
   const firstLeg = legs[0]
   const lastLeg = legs[legs.length - 1]
 
+  const stops = Math.max(0, legs.length - 1)
+
   const segments: ParsedSegment[] = legs.map((leg) => ({
     from: leg.departureStation,
     to: leg.arrivalStation,
@@ -117,8 +136,8 @@ function mapFlight(
     departureTime: firstLeg.departureDateFormatted,
     arrivalTime: lastLeg.arrivalDateFormatted,
     totalDuration: flight.duration,
-    stops: Math.max(0, legs.length - 1),
-    stopsText: flight.stopsText,
+    stops,
+    stopsText: flight.stopsText ?? (stops === 0 ? 'Nonstop' : `${stops} Stop`),
     segments,
     layoverAirports,
     layoverDurations,

@@ -8,7 +8,6 @@ import type { RouteFilters } from './filters'
 import type { ParsedFlight } from './types'
 import { formatEmail } from '../email/formatter'
 import { sendEmail } from '../email/sender'
-import { vpnUp, vpnDown } from './vpn'
 
 let isRunning = false
 
@@ -57,12 +56,6 @@ export async function runScraper(): Promise<void> {
         data: { status: 'success', completedAt: new Date(), routesSearched: 0, datesSearched: 0 },
       })
       return
-    }
-
-    // Spin up VPN for a fresh IP
-    const vpnSessionId = await vpnUp()
-    if (!vpnSessionId) {
-      console.warn('[runner] VPN failed to start — proceeding without VPN')
     }
 
     let fareTabs: string[]
@@ -250,11 +243,8 @@ export async function runScraper(): Promise<void> {
       data: { status: 'failed', completedAt: new Date(), error: err instanceof Error ? err.message : String(err) },
     })
   } finally {
-    // Close the browser to free resources
+    // Clean up resources
     await closeBrowser()
-
-    // Tear down VPN
-    await vpnDown()
 
     isRunning = false
 
