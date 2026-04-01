@@ -5,17 +5,20 @@ import { RecentMatches } from '@/components/dashboard/recent-matches'
 export const dynamic = 'force-dynamic'
 
 export default async function DashboardPage() {
-  const [lastRun, totalRoutes, matchesToday, cheapestFlights] = await Promise.all([
-    prisma.scrapeRun.findFirst({ orderBy: { startedAt: 'desc' } }),
+  const lastRun = await prisma.scrapeRun.findFirst({
+    where: { status: { in: ['success', 'partial'] } },
+    orderBy: { startedAt: 'desc' },
+  })
+
+  const latestRunFilter = lastRun ? { scrapeRunId: lastRun.id } : { id: -1 }
+
+  const [totalRoutes, matchesToday, cheapestFlights] = await Promise.all([
     prisma.route.count({ where: { enabled: true } }),
     prisma.flight.count({
-      where: {
-        matchesFilters: true,
-        scrapedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
-      },
+      where: { ...latestRunFilter, matchesFilters: true },
     }),
     prisma.flight.findMany({
-      where: { matchesFilters: true },
+      where: { ...latestRunFilter, matchesFilters: true },
       include: { route: true },
       orderBy: { price: 'asc' },
       take: 10,
